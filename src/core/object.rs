@@ -1,15 +1,24 @@
 use std::f32::consts::FRAC_PI_4;
 
 use bevy::prelude::*;
+use bevy::reflect::FromReflect;
 use bevy_mod_outline::{Outline, OutlineBundle};
 use bevy_mod_raycast::Ray3d;
 use bevy_mod_raycast::{RayCastMesh, RayCastSource};
 use bevy_rapier3d::prelude::*;
+use bevy_renet::renet::RenetClient;
 use bevy_scene_hook::SceneHook;
 use derive_more::From;
 use iyes_loopless::prelude::*;
 use leafwing_input_manager::prelude::ActionState;
+use tap::TapOptional;
 
+use super::city::City;
+use super::game_world::parent_sync::ParentSync;
+use super::network::{
+    network_event::{AppEventExt, Received},
+    SERVER_ID,
+};
 use super::{
     asset_metadata, control_action::ControlAction, game_state::GameState, game_world::GameEntity,
     preview::PreviewCamera,
@@ -19,9 +28,15 @@ pub(super) struct ObjectPlugin;
 
 impl Plugin for ObjectPlugin {
     fn build(&self, app: &mut App) {
-        app.register_type::<ObjectPath>()
+        app.register_type::<Picked>()
+            .register_type::<ObjectPath>()
+            .add_network_event::<ObjectPicked>()
+            .add_network_event::<ObjectMoved>()
+            .add_network_event::<ObjectSpawned>()
             .add_system(Self::spawn_scene_system.run_in_state(GameState::City))
+            .add_system(Self::cursor_object_spawn_system.run_in_state(GameState::City))
             .add_system(Self::movement_system.run_in_state(GameState::City))
+            .add_system(Self::pick_confirmation_system.run_unless_resource_exists::<RenetClient>())
             .add_system(
                 Self::confirm_system
                     .run_in_state(GameState::City)
@@ -34,11 +49,17 @@ impl Plugin for ObjectPlugin {
             )
             .add_system(
                 Self::ray_system
-                    .chain(Self::selection_system)
+                    .chain(Self::picking_system)
                     .chain(Self::outline_system)
                     .run_in_state(GameState::City)
                     .run_if(is_moving_object),
-            );
+            )
+            .add_system(Self::apply_movement_system.run_unless_resource_exists::<RenetClient>())
+            .add_system_to_stage(
+                CoreStage::PostUpdate,
+                Self::despawn_cursor_object_system.run_in_state(GameState::City),
+            )
+            .add_system(Self::spawn_object_system.run_unless_resource_exists::<RenetClient>());
     }
 }
 
@@ -91,14 +112,14 @@ impl ObjectPlugin {
         None
     }
 
-    fn selection_system(
+    fn picking_system(
         In(entity): In<Option<Entity>>,
-        mut commands: Commands,
+        mut pick_events: EventWriter<ObjectPicked>,
         action_state: Res<ActionState<ControlAction>>,
     ) -> Option<Entity> {
         if let Some(entity) = entity {
             if action_state.just_pressed(ControlAction::Confirm) {
-                commands.entity(entity).insert(MovingObject);
+                pick_events.send(ObjectPicked(entity));
                 None
             } else {
                 Some(entity)
@@ -129,14 +150,58 @@ impl ObjectPlugin {
         *previous_entity = entity;
     }
 
+    fn pick_confirmation_system(
+        mut commands: Commands,
+        mut pick_events: EventReader<Received<ObjectPicked>>,
+    ) {
+        for event in pick_events.iter() {
+            commands
+                .entity(event.message.0)
+                .insert(Picked(event.client_id));
+        }
+    }
+
+    fn cursor_object_spawn_system(
+        mut commands: Commands,
+        client: Option<Res<RenetClient>>,
+        mut picked_objects: Query<
+            (
+                Entity,
+                &Parent,
+                &Picked,
+                &Handle<Scene>,
+                &mut Visibility,
+                &Transform,
+            ),
+            Added<Picked>,
+        >,
+    ) {
+        let client_id = client.map(|client| client.client_id()).unwrap_or(SERVER_ID);
+        for (entity, parent, picked, scene_handle, mut visibility, transform) in &mut picked_objects
+        {
+            if picked.0 == client_id {
+                visibility.is_visible = false;
+                commands.entity(parent.get()).with_children(|parent| {
+                    parent
+                        .spawn_bundle(SceneBundle {
+                            scene: scene_handle.clone(),
+                            transform: *transform,
+                            ..Default::default()
+                        })
+                        .insert(CursorObject::Moving(entity));
+                });
+            }
+        }
+    }
+
     fn movement_system(
         windows: Res<Windows>,
         rapier_ctx: Res<RapierContext>,
         action_state: Res<ActionState<ControlAction>>,
         camera: Query<(&GlobalTransform, &Camera), Without<PreviewCamera>>,
-        mut moving_objects: Query<&mut Transform, With<MovingObject>>,
+        mut cursor_objects: Query<&mut Transform, With<CursorObject>>,
     ) {
-        if let Ok(mut transform) = moving_objects.get_single_mut() {
+        if let Ok(mut transform) = cursor_objects.get_single_mut() {
             if let Some(cursor_pos) = windows
                 .get_primary()
                 .and_then(|window| window.cursor_position())
@@ -164,15 +229,86 @@ impl ObjectPlugin {
         }
     }
 
-    fn cancel_system(mut commands: Commands, moving_objects: Query<Entity, With<MovingObject>>) {
+    fn cancel_system(mut commands: Commands, moving_objects: Query<Entity, With<CursorObject>>) {
         if let Ok(entity) = moving_objects.get_single() {
             commands.entity(entity).despawn();
         }
     }
 
-    fn confirm_system(mut commands: Commands, moving_objects: Query<Entity, With<MovingObject>>) {
-        if let Ok(entity) = moving_objects.get_single() {
-            commands.entity(entity).remove::<MovingObject>();
+    fn confirm_system(
+        mut move_events: EventWriter<ObjectMoved>,
+        mut spawn_events: EventWriter<ObjectSpawned>,
+        cursor_objects: Query<(&Transform, &CursorObject)>,
+    ) {
+        if let Ok((transform, cursor_object)) = cursor_objects.get_single() {
+            match cursor_object {
+                CursorObject::Moving(_) => move_events.send(ObjectMoved {
+                    translation: transform.translation,
+                    rotation: transform.rotation,
+                }),
+                CursorObject::Spawning(object_path) => spawn_events.send(ObjectSpawned {
+                    object_path: object_path.clone(),
+                    translation: transform.translation,
+                    rotation: transform.rotation,
+                }),
+            }
+        }
+    }
+
+    fn apply_movement_system(
+        mut commands: Commands,
+        mut move_events: EventReader<Received<ObjectMoved>>,
+        mut picked_objects: Query<(Entity, &mut Transform, &Picked)>,
+    ) {
+        for event in move_events.iter() {
+            if let Some((entity, mut transform, ..)) = picked_objects
+                .iter_mut()
+                .find(|(.., picked)| picked.0 == event.client_id)
+                .tap_none(|| error!("unable to map received entity"))
+            {
+                transform.translation = event.message.translation;
+                commands.entity(entity).remove::<Picked>();
+            }
+        }
+    }
+
+    fn despawn_cursor_object_system(
+        mut commands: Commands,
+        pick_removals: RemovedComponents<Picked>,
+        cursor_objects: Query<(Entity, &CursorObject)>,
+        mut visibility: Query<&mut Visibility>,
+    ) {
+        if let Ok((cursor_entity, cursor_object)) = cursor_objects.get_single() {
+            if let CursorObject::Moving(moving_entity) = *cursor_object {
+                if let Some(object_entity) = pick_removals
+                    .iter()
+                    .find(|&object_entity| object_entity == moving_entity)
+                {
+                    commands.entity(cursor_entity).despawn_recursive();
+                    let mut visibility = visibility
+                        .get_mut(object_entity)
+                        .expect("object should have visibility");
+                    visibility.is_visible = true;
+                }
+            }
+        }
+    }
+
+    fn spawn_object_system(
+        mut commands: Commands,
+        mut spawn_events: EventReader<Received<ObjectSpawned>>,
+        visible_cities: Query<Entity, (With<City>, With<Visibility>)>,
+    ) {
+        for event in spawn_events.iter() {
+            commands
+                .spawn_bundle(ObjectBundle {
+                    path: ObjectPath(event.message.object_path.clone()),
+                    transform: Transform::default()
+                        .with_translation(event.message.translation)
+                        .with_rotation(event.message.rotation),
+                    ..Default::default()
+                })
+                .insert(ParentSync(visible_cities.single()));
         }
     }
 }
@@ -215,12 +351,36 @@ fn is_placement_confirmed(action_state: Res<ActionState<ControlAction>>) -> bool
     action_state.just_pressed(ControlAction::Confirm)
 }
 
-fn is_moving_object(moving_objects: Query<(), With<MovingObject>>) -> bool {
+fn is_moving_object(moving_objects: Query<(), With<CursorObject>>) -> bool {
     moving_objects.is_empty()
 }
 
+#[derive(Clone, Copy, Debug, Reflect, FromReflect)]
+pub(super) struct ObjectPicked(pub(super) Entity);
+
+#[derive(Clone, Copy, Debug, Reflect, FromReflect)]
+pub(super) struct ObjectMoved {
+    translation: Vec3,
+    rotation: Quat,
+}
+
+#[derive(Clone, Debug, Reflect, FromReflect)]
+pub(super) struct ObjectSpawned {
+    object_path: String,
+    translation: Vec3,
+    rotation: Quat,
+}
+
+#[derive(Component, Default, Reflect)]
+#[reflect(Component)]
+pub(super) struct Picked(u64);
+
+/// Marks an entity as an object that should be moved with cursor to preview spawn position.
 #[derive(Component)]
-pub(crate) struct MovingObject;
+pub(crate) enum CursorObject {
+    Moving(Entity),
+    Spawning(String),
+}
 
 #[derive(Bundle, Default)]
 pub(crate) struct ObjectBundle {
@@ -230,7 +390,7 @@ pub(crate) struct ObjectBundle {
 }
 
 /// Contains path to a an object metadata file.
-#[derive(Component, Default, From, Reflect)]
+#[derive(Clone, Component, Debug, Default, From, FromReflect, Reflect)]
 #[reflect(Component)]
 pub(crate) struct ObjectPath(String);
 
@@ -316,13 +476,13 @@ mod tests {
         let mut app = App::new();
         app.add_plugin(TestMovingObjectPlugin);
 
-        let moving_entity = app.world.spawn().insert(MovingObject).id();
+        let moving_entity = app.world.spawn().insert(CursorObject).id();
         let mut action_state = app.world.resource_mut::<ActionState<ControlAction>>();
         action_state.press(ControlAction::Confirm);
 
         app.update();
 
-        assert!(!app.world.entity(moving_entity).contains::<MovingObject>());
+        assert!(!app.world.entity(moving_entity).contains::<CursorObject>());
     }
 
     #[test]
@@ -330,7 +490,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugin(TestMovingObjectPlugin);
 
-        let moving_entity = app.world.spawn().insert(MovingObject).id();
+        let moving_entity = app.world.spawn().insert(CursorObject).id();
         let mut action_state = app.world.resource_mut::<ActionState<ControlAction>>();
         action_state.press(ControlAction::Cancel);
 
@@ -456,7 +616,7 @@ mod tests {
 
         let outline_entity = app.world.entity(outline_entity);
         assert!(!outline_entity.get::<Outline>().unwrap().visible);
-        assert!(outline_entity.contains::<MovingObject>());
+        assert!(outline_entity.contains::<CursorObject>());
     }
 
     struct TestMovingObjectPlugin;

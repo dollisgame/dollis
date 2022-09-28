@@ -6,7 +6,7 @@ use crate::core::{
     city::City,
     game_state::GameState,
     game_world::parent_sync::ParentSync,
-    object::{MovingObject, ObjectBundle},
+    object::CursorObject,
 };
 
 pub(super) struct SelectedObjectPlugin;
@@ -43,17 +43,17 @@ impl SelectedObjectPlugin {
         let scene_path = asset_metadata::scene_path(metadata_path.path());
 
         commands
-            .spawn_bundle(ObjectBundle {
-                path: scene_path.into(),
+            .spawn_bundle(SceneBundle {
+                scene: asset_server.load(&scene_path),
                 ..Default::default()
             })
-            .insert(MovingObject)
+            .insert(CursorObject::Spawning(scene_path))
             .insert(ParentSync(visible_cities.single()));
     }
 
     fn remove_selection_system(
         mut commands: Commands,
-        moving_objects: Query<(), With<MovingObject>>,
+        moving_objects: Query<(), With<CursorObject>>,
     ) {
         if moving_objects.is_empty() {
             commands.remove_resource::<SelectedObject>();
@@ -98,7 +98,7 @@ mod tests {
 
         let parent_sync = app
             .world
-            .query_filtered::<&ParentSync, (With<MovingObject>, With<ObjectPath>)>()
+            .query_filtered::<&ParentSync, (With<CursorObject>, With<ObjectPath>)>()
             .single(&app.world);
         assert_eq!(parent_sync.0, city);
     }

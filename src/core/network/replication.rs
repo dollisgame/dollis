@@ -438,7 +438,7 @@ pub(super) struct AckedTicks(HashMap<u64, u32>);
 ///
 /// Used only on client.
 #[derive(Default, Deref, DerefMut)]
-struct NetworkEntityMap(EntityMap);
+pub(crate) struct NetworkEntityMap(EntityMap);
 
 #[cfg(test)]
 mod tests {

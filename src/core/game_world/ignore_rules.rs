@@ -9,7 +9,7 @@ use crate::core::{
     city::City,
     family::{Budget, Family},
     game_world::GameEntity,
-    object::ObjectPath,
+    object::{ObjectPath, Picked},
 };
 
 /// Contains [`ComponentId`]'s that used to decide
@@ -34,6 +34,7 @@ impl FromWorld for IgnoreRules {
             world.init_component::<ObjectPath>(),
             world.init_component::<GameEntity>(),
             world.init_component::<ParentSync>(),
+            world.init_component::<Picked>(),
         ]);
 
         let ignored_if_present = HashMap::from([(
