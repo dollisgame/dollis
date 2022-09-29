@@ -1,5 +1,6 @@
 use std::f32::consts::FRAC_PI_4;
 
+use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
 use bevy::reflect::FromReflect;
 use bevy_mod_outline::{Outline, OutlineBundle};
@@ -11,28 +12,38 @@ use bevy_scene_hook::SceneHook;
 use derive_more::From;
 use iyes_loopless::prelude::*;
 use leafwing_input_manager::prelude::ActionState;
+use serde::{Deserialize, Serialize};
 use tap::TapOptional;
 
-use super::city::City;
-use super::game_world::parent_sync::ParentSync;
-use super::network::{
-    network_event::{AppEventExt, Received},
-    SERVER_ID,
-};
+use super::network::network_event::client_event::EventReceived;
 use super::{
-    asset_metadata, control_action::ControlAction, game_state::GameState, game_world::GameEntity,
+    asset_metadata,
+    city::City,
+    control_action::ControlAction,
+    game_state::GameState,
+    game_world::{parent_sync::ParentSync, GameEntity},
+    network::{network_event::client_event::ClientEventPlugin, SERVER_ID},
     preview::PreviewCamera,
 };
 
-pub(super) struct ObjectPlugin;
+pub(super) struct ObjectPlugins;
+
+impl PluginGroup for ObjectPlugins {
+    fn build(&mut self, group: &mut PluginGroupBuilder) {
+        group
+            .add(ClientEventPlugin::<ObjectPicked>::default())
+            .add(ClientEventPlugin::<ObjectMoved>::default())
+            .add(ClientEventPlugin::<ObjectSpawned>::default())
+            .add(ObjectPlugin);
+    }
+}
+
+struct ObjectPlugin;
 
 impl Plugin for ObjectPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<Picked>()
             .register_type::<ObjectPath>()
-            .add_network_event::<ObjectPicked>()
-            .add_network_event::<ObjectMoved>()
-            .add_network_event::<ObjectSpawned>()
             .add_system(Self::spawn_scene_system.run_in_state(GameState::City))
             .add_system(Self::cursor_object_spawn_system.run_in_state(GameState::City))
             .add_system(Self::movement_system.run_in_state(GameState::City))
@@ -152,12 +163,10 @@ impl ObjectPlugin {
 
     fn pick_confirmation_system(
         mut commands: Commands,
-        mut pick_events: EventReader<Received<ObjectPicked>>,
+        mut pick_events: EventReader<EventReceived<ObjectPicked>>,
     ) {
-        for event in pick_events.iter() {
-            commands
-                .entity(event.message.0)
-                .insert(Picked(event.client_id));
+        for EventReceived { client_id, event } in pick_events.iter().copied() {
+            commands.entity(event.0).insert(Picked(client_id));
         }
     }
 
@@ -257,16 +266,16 @@ impl ObjectPlugin {
 
     fn apply_movement_system(
         mut commands: Commands,
-        mut move_events: EventReader<Received<ObjectMoved>>,
+        mut move_events: EventReader<EventReceived<ObjectMoved>>,
         mut picked_objects: Query<(Entity, &mut Transform, &Picked)>,
     ) {
-        for event in move_events.iter() {
+        for EventReceived { client_id, event } in move_events.iter().copied() {
             if let Some((entity, mut transform, ..)) = picked_objects
                 .iter_mut()
-                .find(|(.., picked)| picked.0 == event.client_id)
+                .find(|(.., picked)| picked.0 == client_id)
                 .tap_none(|| error!("unable to map received entity"))
             {
-                transform.translation = event.message.translation;
+                transform.translation = event.translation;
                 commands.entity(entity).remove::<Picked>();
             }
         }
@@ -296,16 +305,16 @@ impl ObjectPlugin {
 
     fn spawn_object_system(
         mut commands: Commands,
-        mut spawn_events: EventReader<Received<ObjectSpawned>>,
+        mut spawn_events: EventReader<EventReceived<ObjectSpawned>>,
         visible_cities: Query<Entity, (With<City>, With<Visibility>)>,
     ) {
-        for event in spawn_events.iter() {
+        for event in spawn_events.iter().map(|event| event.event.clone()) {
             commands
                 .spawn_bundle(ObjectBundle {
-                    path: ObjectPath(event.message.object_path.clone()),
+                    path: ObjectPath(event.object_path),
                     transform: Transform::default()
-                        .with_translation(event.message.translation)
-                        .with_rotation(event.message.rotation),
+                        .with_translation(event.translation)
+                        .with_rotation(event.rotation),
                     ..Default::default()
                 })
                 .insert(ParentSync(visible_cities.single()));
@@ -355,16 +364,16 @@ fn is_moving_object(moving_objects: Query<(), With<CursorObject>>) -> bool {
     moving_objects.is_empty()
 }
 
-#[derive(Clone, Copy, Debug, Reflect, FromReflect)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub(super) struct ObjectPicked(pub(super) Entity);
 
-#[derive(Clone, Copy, Debug, Reflect, FromReflect)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub(super) struct ObjectMoved {
     translation: Vec3,
     rotation: Quat,
 }
 
-#[derive(Clone, Debug, Reflect, FromReflect)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct ObjectSpawned {
     object_path: String,
     translation: Vec3,

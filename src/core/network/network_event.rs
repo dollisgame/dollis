@@ -1,5 +1,5 @@
-mod client_event;
-mod server_event;
+pub(crate) mod client_event;
+pub(crate) mod server_event;
 
 use std::marker::PhantomData;
 

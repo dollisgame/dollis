@@ -23,7 +23,7 @@ impl PluginGroup for NetworkPlugins {
 const DEFAULT_PORT: u16 = 4761;
 const PROTOCOL_ID: u64 = 7;
 const MAX_CLIENTS: usize = 32;
-const SERVER_ID: u64 = 0;
+pub(super) const SERVER_ID: u64 = 0;
 const REPLICATION_CHANNEL_ID: u8 = 0;
 
 fn channel_configs(events_count: u8) -> Vec<ChannelConfig> {

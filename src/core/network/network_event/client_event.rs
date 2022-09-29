@@ -103,10 +103,10 @@ impl<T: Event + Serialize + DeserializeOwned> ClientEventPlugin<T> {
 
 /// An event indicating that the message from client was received.
 /// Emited only on server.
-#[allow(dead_code)]
-struct EventReceived<T> {
-    client_id: u64,
-    event: T,
+#[derive(Clone, Copy)]
+pub(crate) struct EventReceived<T> {
+    pub(crate) client_id: u64,
+    pub(crate) event: T,
 }
 
 #[cfg(test)]

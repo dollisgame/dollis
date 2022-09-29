@@ -124,10 +124,10 @@ fn is_first_world_load(
 }
 
 #[derive(Parser, Clone)]
-#[clap(author, version, about)]
+#[command(author, version, about)]
 pub(crate) struct Cli {
     /// Game command to run.
-    #[clap(subcommand)]
+    #[command(subcommand)]
     subcommand: Option<GameCommand>,
 }
 
@@ -192,10 +192,10 @@ impl Default for Cli {
 pub(crate) enum GameCommand {
     Play(QuickLoad),
     Host {
-        #[clap(flatten)]
+        #[command(flatten)]
         quick_load: QuickLoad,
 
-        #[clap(flatten)]
+        #[command(flatten)]
         server_settings: ServerSettings,
     },
     Join(ConnectionSettings),
@@ -205,11 +205,11 @@ pub(crate) enum GameCommand {
 #[derive(Args, Clone)]
 pub(crate) struct QuickLoad {
     /// World name to load.
-    #[clap(short, long)]
+    #[arg(short, long)]
     world_name: String,
 
     /// City name to load.
-    #[clap(short, long)]
+    #[arg(short, long)]
     city_name: Option<String>,
 }
 
