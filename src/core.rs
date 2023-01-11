@@ -21,6 +21,7 @@ pub(super) mod preview;
 pub(super) mod settings;
 pub(super) mod task;
 mod video;
+mod wall;
 
 use bevy::{app::PluginGroupBuilder, prelude::*};
 
@@ -45,6 +46,7 @@ use preview::PreviewPlugin;
 use settings::SettingsPlugin;
 use task::TaskPlugin;
 use video::VideoPlugin;
+use wall::WallPlugin;
 
 pub(super) struct CorePlugins;
 
@@ -72,5 +74,6 @@ impl PluginGroup for CorePlugins {
             .add(TaskPlugin)
             .add(GameWorldPlugin)
             .add(ObjectPlugin)
+            .add(WallPlugin)
     }
 }
