@@ -1,3 +1,5 @@
+use std::f32::consts::PI;
+
 use bevy::{
     prelude::*,
     render::{mesh::Indices, render_resource::PrimitiveTopology},
@@ -22,10 +24,10 @@ impl WallPlugin {
         commands.spawn(WallBundle {
             vertices: WallVertices(vec![
                 (Vec2::ZERO, Vec2::X * 4.0),
-                // (Vec2::ZERO, Vec2::ONE * 4.0),
-                (Vec2::ZERO, -Vec2::Y * 4.0),
-                // (Vec2::ZERO, -Vec2::X * 4.0),
-                // (-Vec2::X * 4.0, Vec2::ZERO),
+                (Vec2::ZERO, Vec2::ONE * 4.0),
+                (Vec2::ZERO, Vec2::Y * 4.0),
+                // (Vec2::Y * 4.0, -Vec2::ONE * 8.0),
+                // (Vec2::Y * 4.0, -Vec2::ONE * 8.0),
             ]),
             pbr_bundle: PbrBundle {
                 mesh: meshes.add(Mesh::new(PrimitiveTopology::TriangleList)),
@@ -53,11 +55,12 @@ impl WallPlugin {
                     .try_into()
                     .expect("vertex index should fit u32");
 
+                let width = width_vec(a, b);
                 let a_edges = minmax_angles(a, b, vertices);
-                let (left_a, right_a) = offset_points(a, b, a_edges, offset_vec(a, b));
+                let (left_a, right_a) = offset_points(a, b, a_edges, width);
 
                 let b_edges = minmax_angles(b, a, vertices);
-                let (left_b, right_b) = offset_points(b, a, b_edges, offset_vec(b, a));
+                let (left_b, right_b) = offset_points(b, a, b_edges, width);
 
                 positions.push(Vec3::new(left_a.x, 0.0, left_a.y));
                 positions.push(Vec3::new(right_a.x, 0.0, right_a.y));
@@ -94,24 +97,44 @@ impl WallPlugin {
                 indices.push(last_index + 7);
                 indices.push(last_index + 3);
 
-                // Back
-                if let MinMaxResult::NoElements = a_edges {
-                    indices.push(last_index + 1);
-                    indices.push(last_index + 4);
-                    indices.push(last_index + 0);
-                    indices.push(last_index + 1);
-                    indices.push(last_index + 5);
-                    indices.push(last_index + 4);
+                match a_edges {
+                    MinMaxResult::OneElement(_) => (),
+                    MinMaxResult::NoElements => {
+                        // Back
+                        indices.push(last_index + 1);
+                        indices.push(last_index + 4);
+                        indices.push(last_index + 0);
+                        indices.push(last_index + 1);
+                        indices.push(last_index + 5);
+                        indices.push(last_index + 4);
+                    }
+                    MinMaxResult::MinMax(_, _) => {
+                        // Inside triangle to fill the gap between 3+ walls
+                        positions.push(Vec3::new(a.x, HEIGHT, a.y));
+                        indices.push(last_index + 4);
+                        indices.push(positions.len() as u32 - 1);
+                        indices.push(last_index + 5);
+                    }
                 }
 
-                // Front
-                if let MinMaxResult::NoElements = b_edges {
-                    indices.push(last_index + 3);
-                    indices.push(last_index + 7);
-                    indices.push(last_index + 2);
-                    indices.push(last_index + 7);
-                    indices.push(last_index + 6);
-                    indices.push(last_index + 2);
+                match b_edges {
+                    MinMaxResult::OneElement(_) => (),
+                    MinMaxResult::NoElements => {
+                        // Front
+                        indices.push(last_index + 3);
+                        indices.push(last_index + 7);
+                        indices.push(last_index + 2);
+                        indices.push(last_index + 7);
+                        indices.push(last_index + 6);
+                        indices.push(last_index + 2);
+                    }
+                    MinMaxResult::MinMax(_, _) => {
+                        // Inside triangle to fill the gap between 3+ walls
+                        positions.push(Vec3::new(a.x, HEIGHT, a.y));
+                        indices.push(last_index + 7);
+                        indices.push(positions.len() as u32 - 1);
+                        indices.push(last_index + 6);
+                    }
                 }
             }
 
@@ -121,7 +144,7 @@ impl WallPlugin {
     }
 }
 
-fn offset_vec(start: Vec2, end: Vec2) -> Vec2 {
+fn width_vec(start: Vec2, end: Vec2) -> Vec2 {
     const WIDTH: f32 = 0.25;
     const HALF_WIDTH: f32 = WIDTH / 2.0;
     (end - start).perp().normalize() * HALF_WIDTH
@@ -131,17 +154,17 @@ fn offset_points(
     start: Vec2,
     end: Vec2,
     edges: MinMaxResult<(Vec2, Vec2)>,
-    offset: Vec2,
+    width: Vec2,
 ) -> (Vec2, Vec2) {
     match edges {
-        MinMaxResult::NoElements => (start - offset, start + offset),
+        MinMaxResult::NoElements => (start - width, start + width),
         MinMaxResult::OneElement((a, b)) => (
-            wall_intersection(start, end, a, b, -offset),
-            wall_intersection(start, end, a, b, offset),
+            wall_intersection(start, end, b, a, width),
+            wall_intersection(start, end, a, b, -width),
         ),
         MinMaxResult::MinMax((min_a, min_b), (max_a, max_b)) => (
-            wall_intersection(start, end, min_a, min_b, -offset),
-            wall_intersection(start, end, max_a, max_b, offset),
+            wall_intersection(start, end, min_b, min_a, width),
+            wall_intersection(start, end, max_a, max_b, -width),
         ),
     }
 }
@@ -159,15 +182,22 @@ fn minmax_angles(a: Vec2, b: Vec2, vertices: &[(Vec2, Vec2)]) -> MinMaxResult<(V
                 None
             }
         })
-        .minmax_by_key(|&(p1, p2)| (p2 - p1).angle_between(direction))
+        .minmax_by_key(|&(p1, p2)| {
+            let angle = (p2 - p1).angle_between(direction);
+            if angle < 0.0 {
+                angle + PI
+            } else {
+                angle
+            }
+        })
 }
 
-fn wall_intersection(start: Vec2, end: Vec2, a: Vec2, b: Vec2, offset: Vec2) -> Vec2 {
-    let current_line = Line::with_offset(start, end, offset);
-    let line = Line::with_offset(a, b, -offset_vec(a, b));
+fn wall_intersection(start: Vec2, end: Vec2, a: Vec2, b: Vec2, width: Vec2) -> Vec2 {
+    let current_line = Line::with_offset(start, end, width);
+    let line = Line::with_offset(a, b, width_vec(a, b));
     current_line
         .intersection(line)
-        .unwrap_or_else(|| start + offset)
+        .unwrap_or_else(|| start + width)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
